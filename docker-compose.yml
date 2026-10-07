@@ -1,0 +1,246 @@
+# Local demo stand:
+#   * 3 regions x (1 master + 2 streaming replicas) = 9 PostgreSQL nodes,
+#     masters connected by multi-master logical replication (replication-setup);
+#   * central-db + app-central — the centralized baseline (one node for everybody);
+#   * app-geo — the geo-distributed deployment;
+#   * Prometheus, Tempo and Grafana for metrics and traces;
+#   * k6 (profile "k6") for load tests.
+#
+# Host ports: masters 6411/6421/6431, replicas 6412-6413/6422-6423/6432-6433, central 6440,
+#             app-geo 8080, app-central 8081, Grafana 3000, Prometheus 9090, Tempo 3200.
+
+name: geo-music
+
+x-db-env: &db-env
+  POSTGRES_DB: ${DB_NAME:-geomusic}
+  POSTGRES_USER: ${DB_USERNAME:-geo}
+  POSTGRES_PASSWORD: ${DB_PASSWORD:-geo}
+  REPLICATION_USER: ${REPLICATION_USER:-replicator}
+  REPLICATION_PASSWORD: ${REPLICATION_PASSWORD:-replicator}
+
+x-master: &master
+  image: postgres:17-alpine
+  environment: *db-env
+  command:
+    - postgres
+    - -c
+    - wal_level=logical
+    - -c
+    - max_wal_senders=16
+    - -c
+    - max_replication_slots=16
+    - -c
+    - wal_keep_size=512MB
+    - -c
+    - max_logical_replication_workers=8
+    - -c
+    - max_worker_processes=16
+  volumes:
+    - ./infra/postgres/master-init.sh:/docker-entrypoint-initdb.d/10-replication-role.sh:ro
+  healthcheck:
+    test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+    interval: 3s
+    timeout: 3s
+    retries: 40
+  restart: unless-stopped
+
+x-replica: &replica
+  image: postgres:17-alpine
+  user: postgres
+  entrypoint: ["bash", "/scripts/replica-entrypoint.sh"]
+  volumes:
+    - ./infra/postgres:/scripts:ro
+  healthcheck:
+    test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME:-geo} -d ${DB_NAME:-geomusic}"]
+    interval: 3s
+    timeout: 3s
+    retries: 60
+  restart: unless-stopped
+
+x-replica-env: &replica-env
+  REPLICATION_USER: ${REPLICATION_USER:-replicator}
+  PGPASSWORD: ${REPLICATION_PASSWORD:-replicator}
+
+x-app: &app
+  image: geo-music-api:latest
+  restart: unless-stopped
+
+x-app-env: &app-env
+  DB_USERNAME: ${DB_USERNAME:-geo}
+  DB_PASSWORD: ${DB_PASSWORD:-geo}
+  DEFAULT_USER_REGION: EURO
+  OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://tempo:4318/v1/traces
+  TRACING_SAMPLING_PROBABILITY: ${TRACING_SAMPLING_PROBABILITY:-1.0}
+
+services:
+  # ---------------------------------------------------------------- AMER
+  amer-master:
+    <<: *master
+    ports: ["6411:5432"]
+  amer-replica1:
+    <<: *replica
+    environment: { <<: *replica-env, PRIMARY_HOST: amer-master }
+    depends_on: { amer-master: { condition: service_healthy } }
+    ports: ["6412:5432"]
+  amer-replica2:
+    <<: *replica
+    environment: { <<: *replica-env, PRIMARY_HOST: amer-master }
+    depends_on: { amer-master: { condition: service_healthy } }
+    ports: ["6413:5432"]
+
+  # ---------------------------------------------------------------- EURO
+  euro-master:
+    <<: *master
+    ports: ["6421:5432"]
+  euro-replica1:
+    <<: *replica
+    environment: { <<: *replica-env, PRIMARY_HOST: euro-master }
+    depends_on: { euro-master: { condition: service_healthy } }
+    ports: ["6422:5432"]
+  euro-replica2:
+    <<: *replica
+    environment: { <<: *replica-env, PRIMARY_HOST: euro-master }
+    depends_on: { euro-master: { condition: service_healthy } }
+    ports: ["6423:5432"]
+
+  # ---------------------------------------------------------------- ASIA
+  asia-master:
+    <<: *master
+    ports: ["6431:5432"]
+  asia-replica1:
+    <<: *replica
+    environment: { <<: *replica-env, PRIMARY_HOST: asia-master }
+    depends_on: { asia-master: { condition: service_healthy } }
+    ports: ["6432:5432"]
+  asia-replica2:
+    <<: *replica
+    environment: { <<: *replica-env, PRIMARY_HOST: asia-master }
+    depends_on: { asia-master: { condition: service_healthy } }
+    ports: ["6433:5432"]
+
+  # Waits for the schema created by app-geo, then wires the masters together with logical replication.
+  replication-setup:
+    image: postgres:17-alpine
+    entrypoint: ["bash", "/scripts/setup-logical-replication.sh"]
+    environment:
+      PGUSER: ${DB_USERNAME:-geo}
+      PGPASSWORD: ${DB_PASSWORD:-geo}
+      PGDATABASE: ${DB_NAME:-geomusic}
+      REGIONS: amer euro asia
+    volumes:
+      - ./infra/postgres:/scripts:ro
+    depends_on:
+      amer-master: { condition: service_healthy }
+      euro-master: { condition: service_healthy }
+      asia-master: { condition: service_healthy }
+    restart: on-failure
+
+  # ---------------------------------------------------------------- centralized baseline
+  central-db:
+    image: postgres:17-alpine
+    environment: *db-env
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+    ports: ["6440:5432"]
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------- applications
+  app-geo:
+    <<: *app
+    build: .
+    environment:
+      <<: *app-env
+      DEPLOYMENT_NAME: geo
+      AMER_MASTER_URL: jdbc:postgresql://amer-master:5432/${DB_NAME:-geomusic}
+      AMER_REPLICA1_URL: jdbc:postgresql://amer-replica1:5432/${DB_NAME:-geomusic}
+      AMER_REPLICA2_URL: jdbc:postgresql://amer-replica2:5432/${DB_NAME:-geomusic}
+      EURO_MASTER_URL: jdbc:postgresql://euro-master:5432/${DB_NAME:-geomusic}
+      EURO_REPLICA1_URL: jdbc:postgresql://euro-replica1:5432/${DB_NAME:-geomusic}
+      EURO_REPLICA2_URL: jdbc:postgresql://euro-replica2:5432/${DB_NAME:-geomusic}
+      ASIA_MASTER_URL: jdbc:postgresql://asia-master:5432/${DB_NAME:-geomusic}
+      ASIA_REPLICA1_URL: jdbc:postgresql://asia-replica1:5432/${DB_NAME:-geomusic}
+      ASIA_REPLICA2_URL: jdbc:postgresql://asia-replica2:5432/${DB_NAME:-geomusic}
+    depends_on:
+      amer-master: { condition: service_healthy }
+      euro-master: { condition: service_healthy }
+      asia-master: { condition: service_healthy }
+      amer-replica1: { condition: service_started }
+      amer-replica2: { condition: service_started }
+      euro-replica1: { condition: service_started }
+      euro-replica2: { condition: service_started }
+      asia-replica1: { condition: service_started }
+      asia-replica2: { condition: service_started }
+    ports: ["8080:8080"]
+
+  # Same image (built by app-geo), but all nine connection strings point to the single central node.
+  app-central:
+    <<: *app
+    pull_policy: never
+    environment:
+      <<: *app-env
+      DEPLOYMENT_NAME: central
+      AMER_MASTER_URL: &central-url jdbc:postgresql://central-db:5432/${DB_NAME:-geomusic}
+      AMER_REPLICA1_URL: *central-url
+      AMER_REPLICA2_URL: *central-url
+      EURO_MASTER_URL: *central-url
+      EURO_REPLICA1_URL: *central-url
+      EURO_REPLICA2_URL: *central-url
+      ASIA_MASTER_URL: *central-url
+      ASIA_REPLICA1_URL: *central-url
+      ASIA_REPLICA2_URL: *central-url
+    depends_on:
+      central-db: { condition: service_healthy }
+    ports: ["8081:8080"]
+
+  # ---------------------------------------------------------------- observability
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --enable-feature=exemplar-storage
+      - --web.enable-remote-write-receiver
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports: ["9090:9090"]
+    restart: unless-stopped
+
+  tempo:
+    image: grafana/tempo:2.6.1
+    user: "0"
+    command: ["-config.file=/etc/tempo.yaml"]
+    volumes:
+      - ./infra/tempo/tempo.yaml:/etc/tempo.yaml:ro
+    ports:
+      - "3200:3200"
+      - "4317:4317"
+      - "4318:4318"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    volumes:
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on: [prometheus, tempo]
+    ports: ["3000:3000"]
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------- load tests
+  # docker compose run --rm k6 run /scripts/geo_distributed_test.js
+  k6:
+    image: grafana/k6:1.0.0
+    profiles: ["k6"]
+    environment:
+      BASE_URL: http://app-geo:8080
+      CENTRAL_BASE_URL: http://app-central:8080
+      K6_PROMETHEUS_RW_SERVER_URL: http://prometheus:9090/api/v1/write
+      K6_PROMETHEUS_RW_TREND_STATS: p(50),p(95),p(99),avg
+    volumes:
+      - ./k6:/scripts:ro

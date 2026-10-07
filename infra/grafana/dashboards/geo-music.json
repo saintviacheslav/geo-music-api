@@ -1,0 +1,124 @@
+{
+  "uid": "geo-music",
+  "title": "Geo Music: sharding & replication",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "time": { "from": "now-15m", "to": "now" },
+  "tags": ["geo", "postgresql"],
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "API p95 latency: geo vs centralized",
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "exemplar": true,
+          "expr": "histogram_quantile(0.95, sum by (le, job) (rate(http_server_requests_seconds_bucket{uri=~\"/api/.*\"}[1m])))",
+          "legendFormat": "{{job}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Geo p95 latency by user region and node type",
+      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "exemplar": true,
+          "expr": "histogram_quantile(0.95, sum by (le, user_region, db_node_type) (rate(http_server_requests_seconds_bucket{job=\"geo\", uri=~\"/api/.*\"}[1m])))",
+          "legendFormat": "{{user_region}} -> {{db_node_type}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Connections per node (routing)",
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (node, failover) (rate(geo_db_routing_total{job=\"geo\"}[1m]))",
+          "legendFormat": "{{node}} failover={{failover}}"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "SQL query p95",
+      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, job) (rate(jdbc_query_seconds_bucket[1m])))",
+          "legendFormat": "{{job}}"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "state-timeline",
+      "title": "Node availability (geo.db.node.up)",
+      "gridPos": { "x": 0, "y": 16, "w": 12, "h": 9 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "DOWN", "color": "red" }, "1": { "text": "UP", "color": "green" } } }
+          ]
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (node) (geo_db_node_up{job=\"geo\"})",
+          "legendFormat": "{{node}}"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "HikariCP threads waiting for a connection",
+      "gridPos": { "x": 12, "y": 16, "w": 12, "h": 9 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (job, pool) (hikaricp_connections_pending)",
+          "legendFormat": "{{job}} {{pool}}"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "k6: request duration p95 (remote write)",
+      "gridPos": { "x": 0, "y": 25, "w": 24, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (testid, scenario) (k6_http_req_duration_p95)",
+          "legendFormat": "{{testid}} {{scenario}}"
+        }
+      ]
+    }
+  ]
+}

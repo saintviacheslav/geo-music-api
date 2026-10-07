@@ -1,0 +1,123 @@
+# All settings can be overridden with environment variables; defaults match docker-compose.yml
+# port mappings so the app can also be started from the IDE against the dockerized databases.
+
+spring:
+  application:
+    name: geo-music-api
+  threads:
+    virtual:
+      enabled: true
+  jpa:
+    open-in-view: false
+    database: postgresql
+    database-platform: org.hibernate.dialect.PostgreSQLDialect
+    hibernate:
+      ddl-auto: none
+    properties:
+      hibernate:
+        # Hibernate must not open a connection at startup: the target node depends on the request.
+        boot.allow_jdbc_metadata_access: false
+        connection.provider_disables_autocommit: true
+        jdbc:
+          batch_size: 50
+          time_zone: UTC
+        order_inserts: true
+        query:
+          in_clause_parameter_padding: true
+  # Migrations run on every regional master, see GeoSchemaMigrator.
+  flyway:
+    enabled: false
+  sql:
+    init:
+      mode: never
+  jackson:
+    default-property-inclusion: non_null
+    mapper:
+      accept-case-insensitive-enums: true
+  mvc:
+    problemdetails:
+      enabled: true
+
+server:
+  port: ${SERVER_PORT:8080}
+  shutdown: graceful
+
+geo:
+  default-region: ${DEFAULT_USER_REGION:EURO}
+  datasource:
+    username: ${DB_USERNAME:geo}
+    password: ${DB_PASSWORD:geo}
+    pool:
+      master-max-size: ${DB_POOL_MASTER_MAX_SIZE:20}
+      replica-max-size: ${DB_POOL_REPLICA_MAX_SIZE:30}
+      min-idle: ${DB_POOL_MIN_IDLE:2}
+      connection-timeout: ${DB_CONNECTION_TIMEOUT:2s}
+      validation-timeout: ${DB_VALIDATION_TIMEOUT:1s}
+      max-lifetime: ${DB_MAX_LIFETIME:30m}
+    regions:
+      AMER:
+        master-url: ${AMER_MASTER_URL:jdbc:postgresql://localhost:6411/geomusic}
+        replica-urls:
+          - ${AMER_REPLICA1_URL:jdbc:postgresql://localhost:6412/geomusic}
+          - ${AMER_REPLICA2_URL:jdbc:postgresql://localhost:6413/geomusic}
+      EURO:
+        master-url: ${EURO_MASTER_URL:jdbc:postgresql://localhost:6421/geomusic}
+        replica-urls:
+          - ${EURO_REPLICA1_URL:jdbc:postgresql://localhost:6422/geomusic}
+          - ${EURO_REPLICA2_URL:jdbc:postgresql://localhost:6423/geomusic}
+      ASIA:
+        master-url: ${ASIA_MASTER_URL:jdbc:postgresql://localhost:6431/geomusic}
+        replica-urls:
+          - ${ASIA_REPLICA1_URL:jdbc:postgresql://localhost:6432/geomusic}
+          - ${ASIA_REPLICA2_URL:jdbc:postgresql://localhost:6433/geomusic}
+  health:
+    probe-interval: ${DB_HEALTH_PROBE_INTERVAL:5s}
+    probe-timeout: ${DB_HEALTH_PROBE_TIMEOUT:2s}
+  migration:
+    enabled: ${DB_MIGRATION_ENABLED:true}
+    fail-on-error: ${DB_MIGRATION_FAIL_ON_ERROR:false}
+    connect-retries: ${DB_MIGRATION_CONNECT_RETRIES:5}
+
+# datasource-micrometer: spans and timers for JDBC connections and SQL queries
+jdbc:
+  includes: CONNECTION, QUERY
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, info, metrics, prometheus
+  endpoint:
+    health:
+      show-details: always
+      show-components: always
+      status:
+        order: DOWN, OUT_OF_SERVICE, DEGRADED, UP, UNKNOWN
+        http-mapping:
+          DEGRADED: 200
+  health:
+    # Replaced by the per-node "geoDatabase" contributor.
+    db:
+      enabled: false
+  metrics:
+    tags:
+      application: ${spring.application.name}
+      deployment: ${DEPLOYMENT_NAME:geo}
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true
+        jdbc: true
+        geomusic.service: true
+  observations:
+    annotations:
+      enabled: true
+  tracing:
+    sampling:
+      probability: ${TRACING_SAMPLING_PROBABILITY:1.0}
+  otlp:
+    tracing:
+      endpoint: ${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:http://localhost:4318/v1/traces}
+
+logging:
+  level:
+    com.geomusic: ${LOG_LEVEL:INFO}
